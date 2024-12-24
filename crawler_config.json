@@ -1,0 +1,12 @@
+[
+
+  {
+    "source_url" : "https://www.fairfieldnj.org/AgendaCenter",
+    "feed_title": "Fairfield Agenda Center",
+    "feed_description": "PDFs from Fairfield",
+    "link_selector": "a",
+    "pdf_only": true,
+    "output_filename": "fairfield.xml"
+
+  }
+]

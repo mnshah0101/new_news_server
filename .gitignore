@@ -1,0 +1,13 @@
+.env
+
+.DS_Store
+venv/
+/venv/
+logs/
+
+rss/
+
+.venv/
+
+.vscode/
+
