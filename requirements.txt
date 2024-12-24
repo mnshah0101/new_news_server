@@ -7,11 +7,13 @@ click==8.1.8
 feedgen==1.0.0
 Flask==3.1.0
 Flask-Cors==5.0.0
+gunicorn==23.0.0
 idna==3.10
 itsdangerous==2.2.0
 Jinja2==3.1.5
 lxml==5.3.0
 MarkupSafe==3.0.2
+packaging==24.2
 psycopg2-binary==2.9.10
 PyPDF2==3.0.1
 python-dateutil==2.9.0.post0
