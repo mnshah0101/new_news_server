@@ -11,3 +11,5 @@ rss/
 
 .vscode/
 
+
+__pycache__/

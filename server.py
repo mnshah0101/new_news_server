@@ -10,14 +10,22 @@ import logging.handlers
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from app.scraper import run_scraper
+from app.error_handler import APIErrorHandler
 
 # Load environment variables from .env file
 load_dotenv()
 
 app = Flask(__name__)
-CORS(app)
+CORS(app, resources={
+    r"/*": {
+        "origins": "*",
+        "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+        "allow_headers": ["Content-Type", "Authorization"]
+    }
+})
 
 # Set up logging
+
 
 
 def setup_logger():
@@ -50,7 +58,7 @@ def setup_logger():
 
 
 logger = setup_logger()
-
+error_handler = APIErrorHandler(logger)
 
 
 
@@ -75,6 +83,7 @@ def get_db_connection():
 
 
 @app.route('/api/articles/date_range', methods=['GET'])
+@error_handler.handle_endpoint
 def get_by_last_date_range():
     """
     Get PDF articles by date_processed range from the pdf_content table
@@ -141,6 +150,7 @@ def get_by_last_date_range():
 
 
 @app.route('/api/articles', methods=['GET'])
+@error_handler.handle_endpoint
 def get_all_articles_by_source_url():
     """
     Get all PDF articles filtered by source_url from the pdf_content table
@@ -193,7 +203,112 @@ def get_all_articles_by_source_url():
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/api/articles/all', methods=['GET'])
+@error_handler.handle_endpoint
+def get_all_articles():
+    """
+    Get all PDF articles from the pdf_content table
+    """
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+
+        query = """
+            SELECT 
+                id,
+                feed_title,
+                source_link,
+                pdf_url,
+                content,
+                title,
+                page_title,
+                author,
+                creation_date,
+                modification_date,
+                number_of_pages,
+                file_size_bytes,
+                date_processed
+            FROM pdf_content
+            ORDER BY date_processed DESC
+        """
+
+        cursor.execute(query)
+        rows = cursor.fetchall()
+
+        articles = [dict(row) for row in rows]
+
+        cursor.close()
+        conn.close()
+        return jsonify({'articles': articles})
+
+    except psycopg2.Error as e:
+        logger.error(f"Database error: {e}")
+        return jsonify({'error': str(e)}), 500
+    except Exception as e:
+        logger.error(f"Unexpected error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/articles/feed', methods=['GET'])
+@error_handler.handle_endpoint
+def get_articles_by_feed_title():
+    """
+    Get all PDF articles filtered by feed_title from the pdf_content table
+
+    Query parameters:
+    - feed_title: The feed title to filter articles by (required)
+    """
+    feed_title = request.args.get('feed_title', '').strip()
+    if not feed_title:
+        return jsonify({'error': 'feed_title parameter is required'}), 400
+    
+    print(feed_title)
+
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+
+        query = """
+            SELECT 
+                id,
+                feed_title,
+                source_link,
+                pdf_url,
+                content,
+                title,
+                page_title,
+                author,
+                creation_date,
+                modification_date,
+                number_of_pages,
+                file_size_bytes,
+                date_processed
+            FROM pdf_content
+            WHERE feed_title = %s
+            ORDER BY date_processed DESC
+        """
+
+        cursor.execute(query, (feed_title,))
+        rows = cursor.fetchall()
+
+        articles = [dict(row) for row in rows]
+
+        cursor.close()
+        conn.close()
+        return jsonify({'articles': articles})
+
+    except psycopg2.Error as e:
+        logger.error(f"Database error: {e}")
+        return jsonify({'error': str(e)}), 500
+    except Exception as e:
+        logger.error(f"Unexpected error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+# New Routes to Serve RSS Feeds
+
+
 @app.route('/api/article', methods=['GET'])
+@error_handler.handle_endpoint
 def get_article_by_id():
     """
     Get a specific PDF article by id from the pdf_content table.
@@ -251,54 +366,10 @@ def get_article_by_id():
         return jsonify({'error': str(e)}), 500
 
 
-@app.route('/api/articles/all', methods=['GET'])
-def get_all_articles():
-    """
-    Get all PDF articles from the pdf_content table
-    """
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-
-        query = """
-            SELECT 
-                id,
-                feed_title,
-                source_link,
-                pdf_url,
-                content,
-                title,
-                page_title,
-                author,
-                creation_date,
-                modification_date,
-                number_of_pages,
-                file_size_bytes,
-                date_processed
-            FROM pdf_content
-            ORDER BY date_processed DESC
-        """
-
-        cursor.execute(query)
-        rows = cursor.fetchall()
-
-        articles = [dict(row) for row in rows]
-
-        cursor.close()
-        conn.close()
-        return jsonify({'articles': articles})
-
-    except psycopg2.Error as e:
-        logger.error(f"Database error: {e}")
-        return jsonify({'error': str(e)}), 500
-    except Exception as e:
-        logger.error(f"Unexpected error: {e}")
-        return jsonify({'error': str(e)}), 500
-
-# New Routes to Serve RSS Feeds
 
 
 @app.route('/rss/<path:filename>', methods=['GET'])
+@error_handler.handle_endpoint
 def serve_rss_feed(filename):
     """
     Serves the specified RSS feed XML file from the rss directory.
@@ -315,14 +386,13 @@ def serve_rss_feed(filename):
 
     # Prevent directory traversal attacks
     if '..' in filename or filename.startswith('/'):
-        logger.warning(
-            f"Attempted directory traversal with filename: {filename}")
+        logger.warning(f"Attempted directory traversal with filename: {filename}")
         abort(404)
 
     try:
         return send_from_directory(
             directory=rss_directory,
-            filename=filename,
+            path=filename,
             mimetype='application/rss+xml',
             as_attachment=False
         )
@@ -332,9 +402,9 @@ def serve_rss_feed(filename):
 
 
 @app.route('/rss', methods=['GET'])
+@error_handler.handle_endpoint
 def list_rss_feeds():
     """
-    Lists all available RSS feeds in the rss directory.
     
     Example:
     GET /rss
@@ -359,6 +429,7 @@ def list_rss_feeds():
 
 
 @app.route('/', methods=['GET'])
+@error_handler.handle_endpoint
 def index():
     """
     Provides basic information about the API.
@@ -372,15 +443,44 @@ def index():
             '/api/article': 'Get article by ID',
             '/api/articles/all': 'Get all articles',
             '/rss/<filename>': 'Access specific RSS feed',
-            '/rss': 'List all RSS feeds'
+            '/rss': 'List all RSS feeds',
+            '/api/articles/feed': 'Get articles by feed title',
+            '/api/feeds': 'Get all feed titles'
         }
     })
 
 
+@app.route('/api/feeds', methods=['GET'])
+@error_handler.handle_endpoint
+def get_all_feed_titles():
+    """
+    Get all unique feed titles from the all_links table
+    """
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
+        query = """
+            SELECT DISTINCT feed_title
+            FROM all_links
+            ORDER BY feed_title ASC
+        """
 
+        cursor.execute(query)
+        rows = cursor.fetchall()
 
+        feed_titles = [row['feed_title'] for row in rows]
 
+        cursor.close()
+        conn.close()
+        return jsonify({'feed_titles': feed_titles})
+
+    except psycopg2.Error as e:
+        logger.error(f"Database error: {e}")
+        return jsonify({'error': str(e)}), 500
+    except Exception as e:
+        logger.error(f"Unexpected error: {e}")
+        return jsonify({'error': str(e)}), 500
 
 
 def schedule_scraper():
@@ -427,4 +527,5 @@ if __name__ == '__main__':
         logger.debug(f"Created RSS directory at {rss_dir}")
     
     initialize()
-    app.run(debug=True, port=5000)
+    logger.info("Starting server...")
+    app.run(debug=True, port=8081)

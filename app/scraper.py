@@ -14,6 +14,9 @@ import PyPDF2
 import io
 from datetime import datetime
 from dotenv import load_dotenv
+from langchain_openai import ChatOpenAI
+from langchain.prompts import PromptTemplate
+from langchain.chains import LLMChain
 
 
 class WebRSSCrawler:
@@ -52,6 +55,44 @@ class WebRSSCrawler:
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
             "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
         ]
+
+        # Initialize LLM
+        try:
+            self.llm = ChatOpenAI(
+                model="gpt-3.5-turbo",
+                temperature=0,
+                api_key=os.getenv('OPENAI_API_KEY')
+            )
+            
+            # Create prompt template for text cleanup
+            self.cleanup_prompt = PromptTemplate(
+                input_variables=["text"],
+                template="""
+                You are a helpful assistant that makes PDF text more readable for web pages.
+                Please clean up and format the following text from a PDF document:
+                1. Fix any OCR errors or typos
+                2. Add proper paragraph breaks
+                3. Format any lists or tables appropriately
+                4. Remove any unnecessary line breaks or formatting artifacts
+                5. Maintain the original meaning and content
+                6. Use HTML formatting tags where appropriate
+
+                Here's the text to clean up:
+                {text}
+
+                Please provide the cleaned up, well-formatted version:
+                """
+            )
+            
+            self.cleanup_chain = LLMChain(
+                llm=self.llm,
+                prompt=self.cleanup_prompt
+            )
+            
+            self.logger.info("Successfully initialized LLM for text cleanup")
+        except Exception as e:
+            self.logger.error(f"Failed to initialize LLM: {e}")
+            self.cleanup_chain = None
 
     def _ensure_directory_exists(self, directory: str):
         """Ensure that a directory exists; if not, create it."""
@@ -139,8 +180,37 @@ class WebRSSCrawler:
             self.logger.error(f"Error connecting to PostgreSQL: {e}")
             raise
 
+    def _clean_text_with_llm(self, text: str) -> str:
+        """
+        Use LLM to clean up and format the text for better readability
+        """
+        if not text.strip() or not self.cleanup_chain:
+            return text
+
+        try:
+            # Split long texts into manageable chunks (if needed)
+            max_chunk_size = 4000  # Adjust based on your LLM's context window
+            if len(text) > max_chunk_size:
+                self.logger.info("Text too long, processing in chunks")
+                chunks = [text[i:i + max_chunk_size] 
+                         for i in range(0, len(text), max_chunk_size)]
+                cleaned_chunks = []
+                
+                for chunk in chunks:
+                    result = self.cleanup_chain.invoke({"text": chunk})
+                    cleaned_chunks.append(result["text"])
+                
+                return "\n\n".join(cleaned_chunks)
+            else:
+                result = self.cleanup_chain.invoke({"text": text})
+                return result["text"]
+
+        except Exception as e:
+            self.logger.error(f"Error cleaning text with LLM: {e}")
+            return text  # Return original text if LLM processing fails
+
     def _extract_pdf_metadata(self, pdf_content: bytes) -> Dict:
-        """Extract metadata from PDF content"""
+        """Extract metadata and text content from PDF, using OCR if needed"""
         try:
             pdf_file = io.BytesIO(pdf_content)
             pdf_reader = PyPDF2.PdfReader(pdf_file)
@@ -151,11 +221,42 @@ class WebRSSCrawler:
                 page_text = page.extract_text()
                 text_content += page_text if page_text else ""
 
+            # If text content is too short or empty, try OCR
+            if len(text_content.strip()) < 50:
+                self.logger.info("PDF appears to be scanned. Attempting OCR...")
+                try:
+                    import pytesseract
+                    from pdf2image import convert_from_bytes
+                    from PIL import Image
+
+                    # Convert PDF to images
+                    images = convert_from_bytes(pdf_content)
+                    ocr_text = ""
+
+                    # Process each page with OCR
+                    for i, image in enumerate(images):
+                        self.logger.debug(f"Processing page {i+1} with OCR")
+                        page_text = pytesseract.image_to_string(image, lang='eng')
+                        ocr_text += page_text + "\n"
+
+                    if ocr_text.strip():
+                        text_content = ocr_text
+                        self.logger.info("Successfully extracted text using OCR")
+                    else:
+                        self.logger.warning("OCR did not extract any text")
+
+                except Exception as ocr_error:
+                    self.logger.error(f"OCR processing failed: {ocr_error}")
+
+            # Clean up the text using LLM
+            cleaned_text = self._clean_text_with_llm(text_content)
+            self.logger.info("Successfully cleaned text with LLM")
+
             # Get metadata
             metadata = pdf_reader.metadata if pdf_reader.metadata else {}
 
             return {
-                'content': text_content,
+                'content': cleaned_text,
                 'title': metadata.get('/Title', ''),
                 'author': metadata.get('/Author', ''),
                 'creation_date': metadata.get('/CreationDate', ''),
